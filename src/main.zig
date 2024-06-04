@@ -16,7 +16,19 @@ pub fn main() !void {
     const connection = try listener.accept();
 
     try stdout.print("accepted new connection", .{});
-    _ = try connection.stream.write("HTTP/1.1 200 OK\r\n\r\n");
+    var buf: [1024]u8 = undefined;
+
+    const len = try connection.stream.read(&buf);
+    var iter = std.mem.split(u8, buf[0..len], "\r\n");
+    const request = iter.next().?;
+    var req_iter = std.mem.split(u8, request, " ");
+    _ = req_iter.next().?;
+    const target = req_iter.next().?;
+    if (std.mem.eql(u8, target, "/")) {
+        _ = try connection.stream.write("HTTP/1.1 200 OK\r\n\r\n");
+    } else {
+        _ = try connection.stream.write("HTTP/1.1 404 Not Found\r\n\r\n");
+    }
 
     connection.stream.close();
 }
