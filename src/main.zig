@@ -5,6 +5,14 @@ const ConnError = error{
     NotFound,
 };
 
+const HeaderType = union(enum) {
+    Host: []const u8,
+    UserAgent: []const u8,
+    Accept: []const u8,
+};
+
+var headers: std.ArrayList(HeaderType) = undefined;
+
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
 
@@ -30,6 +38,21 @@ pub fn main() !void {
     var req_iter = std.mem.split(u8, request, " ");
     _ = req_iter.next().?;
     const target = req_iter.next().?;
+
+    headers = std.ArrayList(HeaderType).init(std.heap.page_allocator);
+    defer headers.deinit();
+    while (true) {
+        const line = iter.next() orelse break;
+        if (std.mem.eql(u8, line, "")) break;
+
+        var line_iter = std.mem.split(u8, line, " ");
+        const header_name = line_iter.next().?;
+        const header = line_iter.next().?;
+
+        if (std.mem.eql(u8, header_name, "User-Agent:")) {
+            try headers.append(HeaderType{ .UserAgent = header });
+        }
+    }
 
     const writer = connection.stream.writer();
     const r = respond(target);
@@ -61,6 +84,16 @@ fn respond(target: []const u8) ConnError!?[1024:0]u8 {
         return null;
     } else if (std.mem.startsWith(u8, target, "/echo")) {
         const slice = std.fmt.bufPrint(&resp_buf, "{s}", .{target[6..]}) catch return ConnError.NotFound;
+        resp_buf[slice.len] = 0;
+    } else if (std.mem.startsWith(u8, target, "/user-agent")) {
+        var user_agent: []const u8 = undefined;
+        for (headers.items) |header| {
+            switch (header) {
+                .UserAgent => |ua| user_agent = ua,
+                else => continue,
+            }
+        }
+        const slice = std.fmt.bufPrint(&resp_buf, "{s}", .{user_agent}) catch return ConnError.NotFound;
         resp_buf[slice.len] = 0;
     } else {
         return ConnError.NotFound;
