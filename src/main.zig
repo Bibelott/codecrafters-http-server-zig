@@ -11,12 +11,30 @@ const HeaderType = union(enum) {
     Accept: []const u8,
 };
 
+const buf_len = 1024;
+
+const Response = struct {
+    buf: [buf_len:0]u8,
+    content_type: []const u8,
+};
+
 const thread_num = 8;
+
+var directory: ?[]const u8 = undefined;
 
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
 
     try stdout.print("Logs from your program will appear here!\n", .{});
+
+    var args = std.process.args();
+
+    _ = args.next().?;
+    if (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--directory")) {
+            directory = args.next().?;
+        }
+    }
 
     const address = try net.Address.resolveIp("127.0.0.1", 4221);
 
@@ -76,28 +94,29 @@ fn handle_connection(address: std.net.Address) !void {
         _ = try writer.write(status[0..]);
         _ = try writer.write("\r\n");
 
-        const resp_body = r catch null;
+        const response = r catch null;
         var body_len: usize = 0;
         var body_buf: [1024]u8 = undefined;
-        if (resp_body) |body| {
-            _ = try writer.write("Content-Type: text/plain\r\n");
-            body_len = std.mem.indexOfSentinel(u8, 0, &body);
+        if (response) |resp| {
+            try writer.print("Content-Type: {s}\r\n", .{resp.content_type});
+            body_len = std.mem.indexOfSentinel(u8, 0, &resp.buf);
             try writer.print("Content-Length: {d}\r\n", .{body_len});
-            body_buf = body;
+            body_buf = resp.buf;
         }
         _ = try writer.write("\r\n");
         try writer.print("{s}", .{body_buf[0..body_len]});
     }
 }
 
-fn respond(target: []const u8, headers: std.ArrayList(HeaderType)) ConnError!?[1024:0]u8 {
-    var resp_buf: [1024:0]u8 = undefined;
+fn respond(target: []const u8, headers: std.ArrayList(HeaderType)) ConnError!?Response {
+    var response = Response{ .buf = undefined, .content_type = undefined };
 
     if (std.mem.eql(u8, target, "/")) {
         return null;
     } else if (std.mem.startsWith(u8, target, "/echo")) {
-        const slice = std.fmt.bufPrint(&resp_buf, "{s}", .{target[6..]}) catch return ConnError.NotFound;
-        resp_buf[slice.len] = 0;
+        const slice = std.fmt.bufPrint(&response.buf, "{s}", .{target[6..]}) catch return ConnError.NotFound;
+        response.buf[slice.len] = 0;
+        response.content_type = "text/plain";
     } else if (std.mem.startsWith(u8, target, "/user-agent")) {
         var user_agent: []const u8 = undefined;
         for (headers.items) |header| {
@@ -106,11 +125,21 @@ fn respond(target: []const u8, headers: std.ArrayList(HeaderType)) ConnError!?[1
                 else => continue,
             }
         }
-        const slice = std.fmt.bufPrint(&resp_buf, "{s}", .{user_agent}) catch return ConnError.NotFound;
-        resp_buf[slice.len] = 0;
+        const slice = std.fmt.bufPrint(&response.buf, "{s}", .{user_agent}) catch return ConnError.NotFound;
+        response.buf[slice.len] = 0;
+        response.content_type = "text/plain";
+    } else if (std.mem.startsWith(u8, target, "/files")) {
+        const path = target[7..];
+        const cwd = if (directory) |dir|
+            std.fs.openDirAbsolute(dir, .{}) catch return ConnError.NotFound
+        else
+            std.fs.cwd();
+        const slice = cwd.readFile(path, &response.buf) catch return ConnError.NotFound;
+        response.buf[slice.len] = 0;
+        response.content_type = "application/octet-stream";
     } else {
         return ConnError.NotFound;
     }
 
-    return resp_buf;
+    return response;
 }
