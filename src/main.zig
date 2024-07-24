@@ -1,19 +1,29 @@
 const std = @import("std");
 const net = std.net;
 
-const ConnError = error{
-    NotFound,
-};
-
 const HeaderType = union(enum) {
     Host: []const u8,
     UserAgent: []const u8,
     Accept: []const u8,
 };
 
+const RequestType = enum {
+    GET,
+    POST,
+};
+
 const buf_len = 1024;
 
 const Response = struct {
+    code: ResponseCode,
+    body: ?ResponseBody,
+};
+const ResponseCode = enum {
+    OK,
+    FileCreated,
+    NotFound,
+};
+const ResponseBody = struct {
     buf: [buf_len:0]u8,
     content_type: []const u8,
 };
@@ -66,7 +76,7 @@ fn handle_connection(address: std.net.Address) !void {
 
         const request = iter.next().?;
         var req_iter = std.mem.split(u8, request, " ");
-        _ = req_iter.next().?;
+        const req_type: RequestType = if (std.mem.eql(u8, req_iter.next().?, "POST")) RequestType.POST else RequestType.GET;
         const target = req_iter.next().?;
 
         var headers = std.ArrayList(HeaderType).init(std.heap.page_allocator);
@@ -84,39 +94,46 @@ fn handle_connection(address: std.net.Address) !void {
             }
         }
 
+        const req_body = iter.next().?;
+
         const writer = connection.stream.writer();
-        const r = respond(target, headers);
-        const status = if (r) |_|
-            "HTTP/1.1 200 OK"
-        else |err| switch (err) {
-            ConnError.NotFound => "HTTP/1.1 404 Not Found",
+        const response = respond(target, req_type, headers, req_body);
+        const status: []const u8 = switch (response.code) {
+            .OK => "HTTP/1.1 200 OK",
+            .FileCreated => "HTTP/1.1 201 Created",
+            .NotFound => "HTTP/1.1 404 Not Found",
         };
         _ = try writer.write(status[0..]);
         _ = try writer.write("\r\n");
 
-        const response = r catch null;
         var body_len: usize = 0;
         var body_buf: [1024]u8 = undefined;
-        if (response) |resp| {
-            try writer.print("Content-Type: {s}\r\n", .{resp.content_type});
-            body_len = std.mem.indexOfSentinel(u8, 0, &resp.buf);
+
+        if (response.body) |body| {
+            try writer.print("Content-Type: {s}\r\n", .{body.content_type});
+            body_len = std.mem.indexOfSentinel(u8, 0, &body.buf);
             try writer.print("Content-Length: {d}\r\n", .{body_len});
-            body_buf = resp.buf;
+            body_buf = body.buf;
         }
+
         _ = try writer.write("\r\n");
         try writer.print("{s}", .{body_buf[0..body_len]});
     }
 }
 
-fn respond(target: []const u8, headers: std.ArrayList(HeaderType)) ConnError!?Response {
-    var response = Response{ .buf = undefined, .content_type = undefined };
+fn respond(target: []const u8, req_type: RequestType, headers: std.ArrayList(HeaderType), req_body: []const u8) Response {
+    var response = Response{ .code = .NotFound, .body = null };
+    var body = ResponseBody{ .buf = undefined, .content_type = undefined };
 
     if (std.mem.eql(u8, target, "/")) {
-        return null;
+        response.code = .OK;
+        return response;
     } else if (std.mem.startsWith(u8, target, "/echo")) {
-        const slice = std.fmt.bufPrint(&response.buf, "{s}", .{target[6..]}) catch return ConnError.NotFound;
-        response.buf[slice.len] = 0;
-        response.content_type = "text/plain";
+        const slice = std.fmt.bufPrint(&body.buf, "{s}", .{target[6..]}) catch return response;
+        body.buf[slice.len] = 0;
+        body.content_type = "text/plain";
+        response.code = .OK;
+        response.body = body;
     } else if (std.mem.startsWith(u8, target, "/user-agent")) {
         var user_agent: []const u8 = undefined;
         for (headers.items) |header| {
@@ -125,21 +142,28 @@ fn respond(target: []const u8, headers: std.ArrayList(HeaderType)) ConnError!?Re
                 else => continue,
             }
         }
-        const slice = std.fmt.bufPrint(&response.buf, "{s}", .{user_agent}) catch return ConnError.NotFound;
-        response.buf[slice.len] = 0;
-        response.content_type = "text/plain";
+        const slice = std.fmt.bufPrint(&body.buf, "{s}", .{user_agent}) catch return response;
+        body.buf[slice.len] = 0;
+        body.content_type = "text/plain";
+        response.code = .OK;
+        response.body = body;
     } else if (std.mem.startsWith(u8, target, "/files")) {
         const path = target[7..];
         const cwd = if (directory) |dir|
-            std.fs.openDirAbsolute(dir, .{}) catch return ConnError.NotFound
+            std.fs.openDirAbsolute(dir, .{}) catch return response
         else
             std.fs.cwd();
-        const slice = cwd.readFile(path, &response.buf) catch return ConnError.NotFound;
-        response.buf[slice.len] = 0;
-        response.content_type = "application/octet-stream";
-    } else {
-        return ConnError.NotFound;
+        if (req_type == .GET) {
+            const slice = cwd.readFile(path, &body.buf) catch return response;
+            body.buf[slice.len] = 0;
+            body.content_type = "application/octet-stream";
+            response.code = .OK;
+            response.body = body;
+        } else if (req_type == .POST) {
+            const file = cwd.createFile(path, .{}) catch return response;
+            _ = file.write(req_body) catch return response;
+            response.code = .FileCreated;
+        }
     }
-
     return response;
 }
