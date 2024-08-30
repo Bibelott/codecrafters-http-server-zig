@@ -5,6 +5,7 @@ const HeaderType = union(enum) {
     Host: []const u8,
     UserAgent: []const u8,
     Accept: []const u8,
+    AcceptEncoding: []const u8,
 };
 
 const RequestType = enum {
@@ -81,6 +82,7 @@ fn handle_connection(address: std.net.Address) !void {
 
         var headers = std.ArrayList(HeaderType).init(std.heap.page_allocator);
         defer headers.deinit();
+        var encoding = false;
         while (true) {
             const line = iter.next() orelse break;
             if (std.mem.eql(u8, line, "")) break;
@@ -91,6 +93,8 @@ fn handle_connection(address: std.net.Address) !void {
 
             if (std.mem.eql(u8, header_name, "User-Agent:")) {
                 try headers.append(HeaderType{ .UserAgent = header });
+            } else if (std.mem.eql(u8, header_name, "Accept-Encoding:")) {
+                if (std.mem.eql(u8, header, "gzip")) encoding = true;
             }
         }
 
@@ -110,6 +114,9 @@ fn handle_connection(address: std.net.Address) !void {
         var body_buf: [1024]u8 = undefined;
 
         if (response.body) |body| {
+            if (encoding) {
+                try writer.print("Content-Encoding: gzip\r\n", .{});
+            }
             try writer.print("Content-Type: {s}\r\n", .{body.content_type});
             body_len = std.mem.indexOfSentinel(u8, 0, &body.buf);
             try writer.print("Content-Length: {d}\r\n", .{body_len});
