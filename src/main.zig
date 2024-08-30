@@ -1,5 +1,6 @@
 const std = @import("std");
 const net = std.net;
+const gzip = std.compress.gzip;
 
 const HeaderType = union(enum) {
     Host: []const u8,
@@ -114,20 +115,27 @@ fn handle_connection(address: std.net.Address) !void {
         _ = try writer.write("\r\n");
 
         var body_len: usize = 0;
-        var body_buf: [1024]u8 = undefined;
+        var body_buf = std.ArrayList(u8).init(std.heap.page_allocator);
+        defer body_buf.deinit();
+        var body_writer = body_buf.writer();
 
         if (response.body) |body| {
-            if (encoding) {
-                try writer.print("Content-Encoding: gzip\r\n", .{});
-            }
             try writer.print("Content-Type: {s}\r\n", .{body.content_type});
-            body_len = std.mem.indexOfSentinel(u8, 0, &body.buf);
+            const uncompressed_len = std.mem.indexOfSentinel(u8, 0, &body.buf);
+            if (encoding) {
+                _ = try writer.write("Content-Encoding: gzip\r\n");
+                var compressor = try gzip.compressor(body_writer, .{});
+                _ = try compressor.write(body.buf[0..uncompressed_len]);
+                try compressor.finish();
+            } else {
+                _ = try body_writer.write(body.buf[0..uncompressed_len]);
+            }
+            body_len = body_buf.items.len;
             try writer.print("Content-Length: {d}\r\n", .{body_len});
-            body_buf = body.buf;
         }
 
         _ = try writer.write("\r\n");
-        try writer.print("{s}", .{body_buf[0..body_len]});
+        try writer.writeAll(body_buf.items);
     }
 }
 
