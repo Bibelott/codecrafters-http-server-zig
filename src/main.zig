@@ -89,12 +89,15 @@ fn handle_connection(address: std.net.Address) !void {
 
             var line_iter = std.mem.split(u8, line, " ");
             const header_name = line_iter.next().?;
-            const header = line_iter.next().?;
+            const header = line_iter.rest();
 
             if (std.mem.eql(u8, header_name, "User-Agent:")) {
                 try headers.append(HeaderType{ .UserAgent = header });
             } else if (std.mem.eql(u8, header_name, "Accept-Encoding:")) {
-                if (std.mem.eql(u8, header, "gzip")) encoding = true;
+                var i = std.mem.splitSequence(u8, header, ", ");
+                while (i.next()) |enc| {
+                    if (std.mem.eql(u8, enc, "gzip")) encoding = true;
+                }
             }
         }
 
